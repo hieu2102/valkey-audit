@@ -107,6 +107,10 @@ typedef struct ExclusionRule {
     struct ExclusionRule *next;
 } ExclusionRule;
 
+typedef struct ExcludeCommandNode {
+    char *command;
+    struct ExcludeCommandNode *next;
+} ExcludeCommandNode;
 // Structure to hold excluded usernames in a linked list
 typedef struct ExcludedUsernameNode {
     char *username;

@@ -986,6 +986,7 @@ void freeExcludeCommands(){
         ExcludeCommandNode *next = current->next;
         if (current->command) ValkeyModule_Free(current->command);
         ValkeyModule_Free(current);
+        current = next;
     }
     exclude_command_head = NULL;
 }
@@ -2580,6 +2581,90 @@ int setAuditAlwaysAuditConfig(const char *name, int new_val, void *privdata, Val
     return VALKEYMODULE_OK;   
 }
 
+// Command exclusion
+ValkeyModuleString* getAuditCommandExclusionRules(const char* name, void* privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    size_t bufsize = 1024;
+    char *buffer = ValkeyModule_Alloc(bufsize);
+    if (buffer == NULL) {
+        return ValkeyModule_CreateString(NULL, "", 0);
+    }
+    
+    // Build comma-separated list
+    buffer[0] = '\0';
+    size_t pos = 0;  // Track current position in buffer
+    int first = 1;
+    ExcludeCommandNode *current = exclude_command_head;
+    
+    while (current != NULL) {
+        // Calculate the length needed for this rule entry
+        size_t command_len = current->command ? strlen(current->command) : 0;
+        size_t entry_len = command_len +1;  // +1 for potential comma
+
+        // Check if we need to resize the buffer
+        if (pos + entry_len + 1 >= bufsize) {
+            bufsize *= 2;
+            char *new_buffer = ValkeyModule_Realloc(buffer, bufsize);
+            if (new_buffer == NULL) {
+                ValkeyModule_Free(buffer);
+                return ValkeyModule_CreateString(NULL, "", 0);
+            }
+            buffer = new_buffer;
+        }
+        
+        // Add comma if not the first item
+        if (!first) {
+            pos += snprintf(buffer + pos, bufsize - pos, ",");
+        } else {
+            first = 0;
+        }
+        
+        // Add the rule
+        if (current->command) {
+            pos += snprintf(buffer + pos, bufsize - pos, "%s", current->command);
+        }
+        current = current->next;
+    }
+    
+    ValkeyModuleString *result = ValkeyModule_CreateString(NULL, buffer, strlen(buffer));
+    ValkeyModule_Free(buffer);
+    
+    return result;
+}
+
+int setAuditCommandExclusionRules(const char* name, ValkeyModuleString* new_val, void* privdata,
+                           ValkeyModuleString** err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    VALKEYMODULE_NOT_USED(err);
+
+    size_t len;
+    const char* new_list = ValkeyModule_StringPtrLen(new_val, &len);
+
+    // Update the exclusion rules
+    updateCommandExclusionRules(new_list);
+
+    // Log the event with truncation for very long lists
+    char details[200];
+    if (len < 180) {
+        snprintf(details, sizeof(details), "excludecommands=%s", new_list);
+    } else {
+        // Truncate long lists in the log
+        char truncated[180];
+        snprintf(truncated, 177, "%s", new_list);
+        truncated[176] = '\0';
+        strcat(truncated, "...");
+        snprintf(details, sizeof(details), "excludecommands=%s", truncated);
+    }
+
+    if (loglevel_debug) {
+        printf("Audit: %s\n", details);
+    }
+
+    return VALKEYMODULE_OK;
+}
+
 // Exclusion
 ValkeyModuleString *getAuditExclusionRules(const char *name, void *privdata) {
     VALKEYMODULE_NOT_USED(name);
@@ -3770,6 +3855,16 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
             VALKEYMODULE_CONFIG_DEFAULT,
             getAuditExclusionRules, setAuditExclusionRules, 
             NULL, NULL) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+    ValkeyModule_FreeString(ctx, initial_rules);
+
+    ValkeyModuleString *initial_command_exclusion_rules = getAuditCommandExclusionRules("excludecommands", NULL);
+    const char* default_commands = ValkeyModule_StringPtrLen(initial_command_exclusion_rules, NULL);
+    if (ValkeyModule_RegisterStringConfig(
+                ctx, "excludecommands", default_commands, VALKEYMODULE_CONFIG_DEFAULT,
+                getAuditCommandExclusionRules, setAuditCommandExclusionRules, NULL,
+                NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
     ValkeyModule_FreeString(ctx, initial_rules);
