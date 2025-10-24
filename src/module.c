@@ -67,6 +67,9 @@ static ClientUsernameEntry *username_hash[USERNAME_HASH_SIZE] = {0};
 // Global head of the linked list for excluded usernames
 static ExclusionRule *exclusion_rules_head = NULL;
 
+// Global head of the linked list for excluded commands
+static ExcludeCommandNode *exclude_command_head = NULL;
+
 // Hash function for the command lookup
 static unsigned long hash_commands(const char *str, size_t len) {
     const unsigned long FNV_PRIME = 0x01000193;
@@ -973,6 +976,94 @@ static void logAuditEvent(const char *category, const char *command, const char 
     }
     
     writeAuditLog("%s", buffer);
+}
+
+/////   Section for exclude commands functions  /////
+// Free the exclude commands list
+void freeExcludeCommands(){
+    ExcludeCommandNode *current = exclude_command_head;
+    while (current != NULL){
+        ExcludeCommandNode *next = current->next;
+        if (current->command) ValkeyModule_Free(current->command);
+        ValkeyModule_Free(current);
+    }
+    exclude_command_head = NULL;
+}
+
+int isCommandAlreadyExcluded(const char *command){
+    ExcludeCommandNode* current = exclude_command_head;
+    while (current != NULL){
+        int match = (command == NULL && current->command == NULL) ||
+                    (command != NULL && current->command != NULL &&
+                    strcasecmp(current->command, command) ==0);
+        if (match){
+            return 1;
+        }
+        current = current->next;
+    }
+    return 0; //not found
+}
+
+void addExcludeCommand(const char *command){
+    if (command == NULL) return;
+    if (isCommandAlreadyExcluded(command)) return;
+    ExcludeCommandNode* new_rule =
+            (ExcludeCommandNode*)ValkeyModule_Alloc(sizeof(ExcludeCommandNode));
+    if (new_rule == NULL) return; // out-of-memory
+    new_rule->command = ValkeyModule_Strdup(command);
+
+    // check for memory allocation failure
+    if (command && new_rule->command == NULL){
+        if (new_rule->command) ValkeyModule_Free(new_rule->command);
+        ValkeyModule_Free(new_rule);
+        return;
+    }
+    
+    // add command to list
+    new_rule->next = exclude_command_head;
+    exclude_command_head = new_rule;
+
+    // Log the added rule
+    char log_message[256];
+    snprintf(log_message, sizeof(log_message), "Added command exclusion rule: command=%s", command);
+    if (loglevel_debug) {
+        printf("%s\n", log_message);
+    }
+}
+
+int isCommandExcluded(const char *command){
+    if (command == NULL) return 0;
+    ExcludeCommandNode* current = exclude_command_head;
+    while (current != NULL){
+        if (strcasecmp(current->command, command) ==0) return 1;
+        current = current->next;
+    }
+    return 0;
+}
+
+void updateCommandExclusionRules(const char *csv_list){
+    freeExcludeCommands();
+    if (csv_list == NULL || *csv_list == '\0') return;
+    char *list_copy = ValkeyModule_Strdup(csv_list);
+    if (list_copy == NULL) return;
+    char *token = strtok(list_copy, ",");
+    while (token != NULL){
+        // Trim whitespace
+        while (*token == ' ')
+            token++;
+        char* end = token + strlen(token) - 1;
+        while (end > token && *end == ' ')
+            end--;
+        *(end + 1) = '\0';
+
+        // Check if not empty
+        if (*token != '\0') {
+            char *command = token;
+            if (command != NULL) addExcludeCommand(command);
+        }
+        token = strtok(NULL, ",");
+    }
+    ValkeyModule_Free(list_copy);
 }
 
 /////   Section for exclusion rules functions  /////
@@ -3036,6 +3127,10 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
         return;
     }
     
+    if (isCommandExcluded(cmd_str)){
+        audit_metrics_inc_exclusion();
+        return; // Is a excluded command, so exit
+    }
     // Pre-compute command type flags using single pass through command
     int is_config_cmd = (cmd_len == 6 && strcasecmp(cmd_str, "config") == 0);
     int is_auth_cmd = (cmd_len == 4 && strcasecmp(cmd_str, "auth") == 0);
@@ -3417,6 +3512,12 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
             
             // Update the exclusion rules
             updateExclusionRules(exclude_rules);
+        }
+        // Handle excludecommand argument
+        else if (i < argc -1 && strcasecmp(arg, "excludecommands") == 0){
+            const char *exclude_commands = ValkeyModule_StringPtrLen(argv[i+1], NULL);
+            i++;  // Skip the next argument since we processed it
+            updateCommandExclusionRules(exclude_commands);
         }
         // Handle disable-payload argument
         else if (strcasecmp(arg, "payload_disable") == 0) {
